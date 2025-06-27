@@ -15,9 +15,10 @@ from langchain.text_splitter import (
     LatexTextSplitter
 )
 
-
 from services.utils import extract_text
 
+import os
+from pymongo import MongoClient
 
 # Default configurations
 DEFAULT_CHUNK_SIZE = 1000
@@ -26,6 +27,30 @@ DEFAULT_COLLECTION_NAME = "mcp"
 DEFAULT_QDRANT_HOST = "localhost"
 DEFAULT_QDRANT_PORT = 6333
 VECTOR_SIZE = 3072
+
+# MongoDB config from environment
+MONGODB_URI = os.getenv("MONGODB_URI")
+MONGODB_DB = os.getenv("MONGODB_DB")
+MONGODB_COLLECTION = os.getenv("MONGODB_COLLECTION")
+
+def save_document_to_mongo(mongo_client: MongoClient, document_id: str, text: str, metadata: dict = None):
+    """Save or update a document in MongoDB with _id=document_id and text."""
+    if not mongo_client:
+        print("[MongoDB] No client provided, skipping save.")
+        return
+    if not (MONGODB_DB and MONGODB_COLLECTION):
+        print("[MongoDB] Missing database/collection info, skipping save.")
+        return
+    db = mongo_client[MONGODB_DB]
+    collection = db[MONGODB_COLLECTION]
+    doc = {
+        "_id": document_id,
+        "text": text,
+    }
+    if metadata:
+        doc.update(metadata)
+    collection.replace_one({"_id": document_id}, doc, upsert=True)
+    print(f"[MongoDB] Saved document_id={document_id} to MongoDB.")
 
 
 class ChunkingMethod:
@@ -49,7 +74,8 @@ class DocumentProcessor:
                  qdrant_host: str = DEFAULT_QDRANT_HOST,
                  qdrant_port: int = DEFAULT_QDRANT_PORT,
                  embedding_model: AzureOpenAIEmbeddings = None,
-                 vector_size: int = VECTOR_SIZE):
+                 vector_size: int = VECTOR_SIZE,
+                 mongo_client: MongoClient = None):
         """
         Initialize DocumentProcessor with configuration parameters.
         
@@ -59,10 +85,12 @@ class DocumentProcessor:
             qdrant_port: Qdrant server port
             embedding_model: Pre-configured AzureOpenAIEmbeddings instance
             vector_size: Expected vector dimension for the collection
+            mongo_client: MongoDB client instance
         """
         self.collection_name = collection_name
         self.vector_size = vector_size
         self.client = QdrantClient(host=qdrant_host, port=qdrant_port)
+        self.mongo_client = mongo_client
         
         if not self.client.collection_exists(self.collection_name):
             print(f"Collection '{self.collection_name}' does not exist. Creating it.")
@@ -250,6 +278,32 @@ class DocumentProcessor:
                 print(f"Error upserting points to Qdrant for document ID {document_id}: {e}")
         else:
             print(f"No chunks to upsert for document ID: {document_id}")
+
+        # Save to MongoDB after extracting text (if document_id is provided)
+        if document_id and self.mongo_client:
+            save_document_to_mongo(self.mongo_client, document_id, text, metadata={
+                "document_name": document_name,
+                "file_type": file_type
+            })
+
+    def extract_and_save_to_mongo(
+        self,
+        file_path: str,
+        document_id: str,
+        document_name: str = None,
+        file_type: str = None,
+        metadata: dict = None
+    ):
+        """Extract text from file and save to MongoDB only (no vectorization)."""
+        text = extract_text(file_path)
+        meta = metadata or {}
+        meta.update({
+            "document_name": document_name,
+            "file_type": file_type
+        })
+        save_document_to_mongo(self.mongo_client, document_id, text, meta)
+        print(f"[MongoDB] Only saved extracted text for document_id={document_id}")
+        return text
 
 
 # if __name__ == "__main__":

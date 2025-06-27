@@ -11,9 +11,14 @@ import uuid
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.prebuilt import create_react_agent
 from langchain_openai import AzureChatOpenAI
-
+from utils import astream_graph
 from mcp.client.session import ClientSession
 from mcp.client.sse import sse_client
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
 
 # ----------------------------
 # FastAPI Setup
@@ -36,21 +41,15 @@ AZURE_OPENAI_MODEL_NAME = os.getenv("AZURE_OPENAI_MODEL_NAME")
 AZURE_OPENAI_MODEL_API_VERSION = os.getenv("AZURE_OPENAI_MODEL_API_VERSION")
 
 DOCUMENT_MCP_URL = "http://localhost:8001/sse"
+DOCDB_SUMMARIZATION_MCP_URL = "http://localhost:8003/sse"
+RAG_MCP_URL = "http://localhost:8002/sse"
 
 # ----------------------------
 # Global Variables
 # ----------------------------
 agent = None
 mcp_client = None
-rag_prompt = """
-        You are a helpful assistant that have access to a vector database of documents.
-        You can answer questions about the documents.
-        You can also search the documents for specific information.
-        You can also add new documents to the vector database.
-        You can also delete documents from the vector database.
-        You can also update documents in the vector database.
-        You can also list the documents in the vector database.
-"""
+
 
 # ----------------------------
 # Model and Agent Setup (once on startup)
@@ -69,11 +68,34 @@ async def setup_agent():
 
     # Connect to Document MCP server
     mcp_client = MultiServerMCPClient({
-        "DocumentService": {
-            "url": DOCUMENT_MCP_URL,
+
+        # "DocDBSummarizationService": {
+        #     "url": DOCDB_SUMMARIZATION_MCP_URL,
+        #     "transport": "sse",
+        # },
+        "RAGService": {
+            "url": RAG_MCP_URL,
             "transport": "sse",
         }
     })
+    tools = await mcp_client.get_tools()
+    AGENT_PROMPT = """
+    You are an AI assistant with connection to these services:
+    - DocDBSummarizationService: for summarizing documents
+    - RAGService: for querying the vector database
+
+    You only use the DocDBSummarizationService to summarize documents.
+    You can use the RAGService to query the vector database and answer questions related to user's personal documents.
+    """
+    agent = create_react_agent(model, tools, prompt=AGENT_PROMPT)
+
+@app.post("/agent")
+async def agent(query: str):
+    """Query the vector database"""
+    answer = await astream_graph(
+        agent, {"messages": query}
+    )
+    return answer
 
 # ----------------------------
 # Document Management Routes
@@ -121,6 +143,37 @@ async def upload_document(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     
+@app.post("/documents/upload-mongo")
+async def upload_document_mongo(file: UploadFile = File(...)):
+    """Upload a document and save text to MongoDB only (no vectorization)"""
+    try:
+        document_id = str(uuid.uuid4())
+        file_content = await file.read()
+        file_path = UPLOAD_DIR / f"{document_id}_{file.filename}"
+        with open(file_path, 'wb') as f:
+            f.write(file_content)
+        # Call the new tool via MCP
+        async with sse_client(DOCUMENT_MCP_URL) as (read_stream, write_stream):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                result = await session.call_tool(
+                    "upload_and_save_to_mongo",
+                    arguments={
+                        "file_path": file_path,
+                        "filename": file.filename,
+                        "document_id": document_id
+                    }
+                )
+        return {
+            "status": "success",
+            "document_id": document_id,
+            "filename": file.filename,
+            "file_path": str(file_path),
+            "processing_result": result
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 # ----------------------------
 #  RAG Routes
 # ----------------------------
