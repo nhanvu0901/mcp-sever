@@ -2,6 +2,7 @@ from langchain_openai import AzureOpenAIEmbeddings
 import uuid
 from qdrant_client import QdrantClient
 from qdrant_client.models import VectorParams, Distance, PointStruct
+from pymongo.errors import OperationFailure
 
 from langchain.text_splitter import (
     RecursiveCharacterTextSplitter,
@@ -41,16 +42,25 @@ def save_document_to_mongo(mongo_client: MongoClient, document_id: str, text: st
     if not (MONGODB_DB and MONGODB_COLLECTION):
         print("[MongoDB] Missing database/collection info, skipping save.")
         return
-    db = mongo_client[MONGODB_DB]
-    collection = db[MONGODB_COLLECTION]
-    doc = {
-        "_id": document_id,
-        "text": text,
-    }
-    if metadata:
-        doc.update(metadata)
-    collection.replace_one({"_id": document_id}, doc, upsert=True)
-    print(f"[MongoDB] Saved document_id={document_id} to MongoDB.")
+    try:
+        db = mongo_client[MONGODB_DB]
+        collection = db[MONGODB_COLLECTION]
+        doc = {
+            "_id": document_id,
+            "text": text,
+        }
+        if metadata:
+            doc.update(metadata)
+        result = collection.replace_one({"_id": document_id}, doc, upsert=True)
+        if result.upserted_id or result.modified_count > 0:
+            print(f"[MongoDB] Saved document_id={document_id} to MongoDB")
+            return True
+        else:
+            print(f"[MongoDB] No changes made for document_id={document_id}")
+            return True
+    except OperationFailure as e:
+        print(f"[MongoDB] Operation failed for document_id={document_id}: {e}")
+        return False
 
 
 class ChunkingMethod:

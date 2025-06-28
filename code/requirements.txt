@@ -25,11 +25,10 @@ pdfplumber
 python-pptx
 xlrd
 fastapi
-
 litellm>=1.67.1
 lingua-language-detector>=2.1.0
 semchunk>=3.2.1
 regex>=2024.11.6
 openai>=1.75.0
-
 pymongo
+pymupdf4llm
